@@ -1,0 +1,211 @@
+# -------------------------------------------------
+# IMPORTS
+# -------------------------------------------------
+import os
+print("Saving to:", os.getcwd())
+import pandas as pd
+import numpy as np
+import datetime
+from faker import Faker
+fake = Faker("en_GB")
+
+# -------------------------------------------------
+# CONSTANTS
+# -------------------------------------------------
+NUM_EMPLOYEES = 40
+REPORT_START = datetime.date(2024, 1, 1)
+REPORT_END = datetime.date(2025, 12, 31)
+MONTHS = pd.date_range(REPORT_START, REPORT_END, freq="MS")
+
+DEPARTMENTS = ["Finance", "Operations", "Engineering", "Sales", "HR"]
+
+CONTRACT_TYPES = ["Contractor", "Permanent", "Fixed Term"]
+CONTRACT_PROBS = [0.25, 0.60, 0.15]
+
+CHURN_PROBS = {
+    "Contractor": 0.40,
+    "Permanent": 0.10,
+    "Fixed Term": 0.00
+}
+
+# -------------------------------------------------
+# EMPLOYEE GENERATION
+# -------------------------------------------------
+
+def generate_employees(n):
+
+    employees = []
+
+    for i in range(n):
+
+        start_date = fake.date_between(
+            start_date=REPORT_START,
+            end_date=datetime.date(2025, 10, 1)
+        )
+
+        contract_type = np.random.choice(CONTRACT_TYPES, p=CONTRACT_PROBS)
+
+        # ----- Leave Date Logic -----
+
+        leave_date = None
+
+        if contract_type == "Fixed Term":
+
+            months_length = np.random.randint(3, 7)
+            leave_candidate = (
+                pd.to_datetime(start_date) +
+                pd.DateOffset(months=months_length)
+            ).date()
+
+            # Cap inside reporting window
+            leave_date = min(leave_candidate, REPORT_END)
+
+        else:
+            if np.random.rand() < CHURN_PROBS[contract_type]:
+                # Only generate if start < report end
+                if start_date < REPORT_END:
+                    leave_date = fake.date_between(
+                        start_date=start_date,
+                        end_date=REPORT_END
+                    )
+
+        # ----- Pay Model -----
+
+        if contract_type == "Contractor":
+            annual_salary = None
+            day_rate = np.random.randint(300, 800)
+        else:
+            annual_salary = np.random.randint(24000, 150000)
+            day_rate = None
+
+        employees.append({
+            "EmployeeID": f"EMP{1000+i}",
+            "Name": fake.name(),
+            "Department": np.random.choice(DEPARTMENTS),
+            "ContractType": contract_type,
+            "AnnualSalary": annual_salary,
+            "DayRate": day_rate,
+            "StartDate": pd.to_datetime(start_date),
+            "LeaveDate": pd.to_datetime(leave_date) if leave_date else None
+        })
+
+    return pd.DataFrame(employees)
+
+
+employees_df = generate_employees(NUM_EMPLOYEES)
+
+# -------------------------------------------------
+# MONTHLY PAYROLL FUNCTION
+# -------------------------------------------------
+
+def generate_month(month):
+
+    records = []
+
+    month_start = pd.to_datetime(month)
+    month_end = month_start + pd.offsets.MonthEnd(0)
+
+    for _, emp in employees_df.iterrows():
+
+        # ----- Active Check -----
+
+        if emp["StartDate"] > month_end:
+            continue
+
+        if pd.notnull(emp["LeaveDate"]) and emp["LeaveDate"] < month_start:
+            continue
+
+        # ----- Pro-rata -----
+
+        days_in_month = (month_end - month_start).days + 1
+        active_start = max(emp["StartDate"], month_start)
+        active_end = (
+            min(emp["LeaveDate"], month_end)
+            if pd.notnull(emp["LeaveDate"])
+            else month_end
+        )
+
+        days_worked = (active_end - active_start).days + 1
+        proration = days_worked / days_in_month
+
+        # ----- Pay Calculation -----
+
+        if emp["ContractType"] == "Contractor":
+            basic = emp["DayRate"] * days_worked
+            overtime = 0
+            bonus = 0
+        else:
+            basic_full = emp["AnnualSalary"] / 12
+            basic = basic_full * proration
+            overtime = np.random.uniform(0, 300) * proration
+            bonus = (
+                np.random.uniform(0, 700) * proration
+                if np.random.rand() > 0.85
+                else 0
+            )
+
+        gross = basic + overtime + bonus
+
+        # ----- Deductions -----
+
+        pension = 0 if emp["ContractType"] == "Contractor" else gross * 0.05
+        taxable = gross - pension
+
+        if emp["ContractType"] == "Contractor":
+            paye = 0
+            ni = 0
+        else:
+            # Simple flat band logic (still simplified)
+            if taxable <= 50000:
+                paye = taxable * 0.20
+            elif taxable <= 90000:
+                paye = taxable * 0.40
+            else:
+                paye = taxable * 0.45
+
+            ni = taxable * 0.08
+
+        student_loan = taxable * 0.09 if np.random.rand() > 0.7 else 0
+
+        net = gross - (pension + paye + ni + student_loan)
+
+        records.append({
+            "EmployeeID": emp["EmployeeID"],
+            "Name": emp["Name"],
+            "Department": emp["Department"],
+            "ContractType": emp["ContractType"],
+            "StartDate": emp["StartDate"].date(),
+            "LeaveDate": (
+                emp["LeaveDate"].date()
+                if pd.notnull(emp["LeaveDate"])
+                else ""
+            ),
+            "BasicPay": round(basic, 2),
+            "Overtime": round(overtime, 2),
+            "Bonus": round(bonus, 2),
+            "GrossPay": round(gross, 2),
+            "PAYE": round(paye, 2),
+            "NI": round(ni, 2),
+            "Pension": round(pension, 2),
+            "StudentLoan": round(student_loan, 2),
+            "NetPay": round(net, 2)
+        })
+
+    return pd.DataFrame(records)
+
+
+# -------------------------------------------------
+# WRITE TO EXCEL (MONTHLY TABS)
+# -------------------------------------------------
+
+with pd.ExcelWriter(
+    "Dummy_Payroll_Final.xlsx",
+    engine="openpyxl"
+) as writer:
+
+    for month in MONTHS:
+        df = generate_month(month)
+        sheet_name = month.strftime("%Y_%B")
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+print("Payroll file created successfully.")
